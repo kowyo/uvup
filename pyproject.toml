@@ -16,8 +16,8 @@ dependencies = [
 dev = [
     "commitizen>=4.13.9",
     "prek>=0.3.8",
-    "ruff>=0.15.10",
-    "ty>=0.0.29",
+    "ruff>=0.15.9",
+    "ty>=0.0.28",
 ]
 
 [project.scripts]
