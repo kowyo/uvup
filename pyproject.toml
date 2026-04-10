@@ -1,26 +1,31 @@
 [project]
-name = "starter"
+name = "uvup"
 version = "0.1.0"
-description = "Add your description here"
+description = "A CLI tool to update uv dependencies like pnpm update"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "httpx>=0.28.1",
+    "packaging>=26.0",
+    "tomlkit>=0.14.0",
+    "typer>=0.24.1",
+]
 
 [dependency-groups]
 dev = [
     "commitizen>=4.13.9",
-    "prek>=0.3.5",
-    "ruff>=0.15.5",
-    "ty>=0.0.21",
+    "prek>=0.3.8",
+    "ruff>=0.15.10",
+    "ty>=0.0.29",
 ]
 
 [project.scripts]
-starter = "starter:main"
+uvup = "uvup:main"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "PTH"]
 ignore = ["E501"]
 
 [build-system]
-requires = ["uv_build>=0.10.0,<0.11.0"]
+requires = ["uv_build>=0.11.0,<0.12.0"]
 build-backend = "uv_build"
