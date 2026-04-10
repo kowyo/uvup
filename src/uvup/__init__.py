@@ -2,12 +2,22 @@
 
 import re
 import subprocess
+from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated
 
 import tomlkit
 import typer
 from tomlkit import TOMLDocument
+
+
+# Callback to handle --version flag
+def version_callback(value: bool) -> None:
+    """Print version and exit."""
+    if value:
+        typer.echo(f"uvup {version('uvup')}")
+        raise typer.Exit()
+
 
 app = typer.Typer(help="Update uv dependencies in pyproject.toml like pnpm")
 
@@ -125,6 +135,16 @@ def update(
         bool,
         typer.Option(
             "--dry-run", "-n", help="Show what would be updated without making changes"
+        ),
+    ] = False,
+    show_version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-v",
+            help="Show the version and exit",
+            callback=version_callback,
+            is_eager=True,
         ),
     ] = False,
 ) -> None:
