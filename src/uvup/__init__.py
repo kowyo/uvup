@@ -129,7 +129,8 @@ def collect_dependencies(
 @app.command()
 def update(
     packages: Annotated[
-        list[str], typer.Argument(help="Specific packages to update (default: all)")
+        list[str] | None,
+        typer.Argument(help="Specific packages to update (default: all)"),
     ] = None,
     path: Annotated[
         Path, typer.Option("--file", "-f", help="Path to pyproject.toml")
