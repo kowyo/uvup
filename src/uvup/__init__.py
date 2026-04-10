@@ -17,9 +17,6 @@ app = typer.Typer(help="Update uv dependencies in pyproject.toml like pnpm")
 # PyPI API base URL
 PYPI_API_URL = "https://pypi.org/pypi/{package}/json"
 
-# Regex to parse package specs like "requests>=2.0.0", "httpx==1.0.0", etc.
-PACKAGE_SPEC_RE = re.compile(r"^([a-zA-Z0-9_-]+)(.*)$")
-
 
 def extract_package_name(dep: str) -> tuple[str, str]:
     """Extract package name and version specifier from a dependency string.
@@ -157,53 +154,20 @@ async def fetch_latest_version(
         return None
 
 
-def update_dependency_in_toml(
-    doc: TOMLDocument,
-    dep_list: list,
-    updates: dict[str, tuple[str, str]],  # package_name -> (old_spec, new_spec)
-    section_name: str,
-) -> bool:
-    """Update dependencies in a TOML list.
-
-    Args:
-        doc: TOML document
-        dep_list: List of dependency strings
-        updates: Dictionary of updates to apply
-        section_name: Name of the section (for logging)
-
-    Returns:
-        True if any updates were made
-    """
-    modified = False
-
-    for i, dep in enumerate(dep_list):
-        if isinstance(dep, str):
-            package_name, _ = extract_package_name(dep)
-            base_name = re.sub(r"\[.*\]", "", package_name)
-
-            if base_name in updates:
-                _, new_spec = updates[base_name]
-                # Preserve the original format (extras, etc.)
-                dep_list[i] = new_spec
-                modified = True
-
-    return modified
-
-
 async def get_updates_for_packages(
     packages: list[
-        tuple[str, str, str | None]
-    ],  # (full_dep, package_name, version_spec)
+        tuple[str, str, str | None, str | None]
+    ],  # (full_dep, package_name, version_spec, group)
     dry_run: bool = False,
-) -> dict[str, tuple[str, str]]:
+) -> dict[str, tuple[str, str, str | None]]:
     """Get version updates for a list of packages.
 
     Args:
-        packages: List of (full_dep, package_name, version_spec) tuples
+        packages: List of (full_dep, package_name, version_spec, group) tuples
         dry_run: If True, don't actually fetch versions
 
     Returns:
-        Dictionary mapping base package names to (old_dep, new_dep) tuples
+        Dictionary mapping base package names to (old_dep, new_dep, group) tuples
     """
     updates = {}
 
@@ -211,19 +175,25 @@ async def get_updates_for_packages(
         tasks = []
         package_info = []
 
-        for full_dep, package_name, version_spec in packages:
+        for full_dep, package_name, version_spec, group in packages:
             base_name = re.sub(r"\[.*\]", "", package_name)
 
             # Always fetch versions, but don't apply changes in dry-run mode
             task = fetch_latest_version(client, package_name)
             tasks.append(task)
-            package_info.append((full_dep, package_name, version_spec, base_name))
+            package_info.append(
+                (full_dep, package_name, version_spec, base_name, group)
+            )
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for (full_dep, package_name, version_spec, base_name), latest_version in zip(
-            package_info, results, strict=True
-        ):
+        for (
+            full_dep,
+            package_name,
+            version_spec,
+            base_name,
+            group,
+        ), latest_version in zip(package_info, results, strict=True):
             if isinstance(latest_version, Exception):
                 typer.echo(f"Error checking {base_name}: {latest_version}", err=True)
                 continue
@@ -250,7 +220,7 @@ async def get_updates_for_packages(
             # Build new spec
             new_dep = build_new_spec(package_name, operator, latest_version)
 
-            updates[base_name] = (full_dep, new_dep)
+            updates[base_name] = (full_dep, new_dep, group)
 
             # Show the update (with [DRY RUN] prefix if in dry-run mode)
             prefix = "[DRY RUN] " if dry_run else ""
@@ -259,14 +229,17 @@ async def get_updates_for_packages(
     return updates
 
 
-def collect_dependencies(doc: TOMLDocument) -> list[tuple[str, str, str | None]]:
+def collect_dependencies(
+    doc: TOMLDocument,
+) -> list[tuple[str, str, str | None, str | None]]:
     """Collect all dependencies from pyproject.toml.
 
     Args:
         doc: Parsed TOML document
 
     Returns:
-        List of (full_dep, package_name, version_spec) tuples
+        List of (full_dep, package_name, version_spec, group) tuples.
+        group is None for main dependencies, or the group name for dependency groups.
     """
     packages = []
 
@@ -279,32 +252,47 @@ def collect_dependencies(doc: TOMLDocument) -> list[tuple[str, str, str | None]]
                 if isinstance(dep, str):
                     package_name, version_spec = extract_package_name(dep)
                     packages.append(
-                        (dep, package_name, version_spec if version_spec else None)
+                        (
+                            dep,
+                            package_name,
+                            version_spec if version_spec else None,
+                            None,
+                        )
                     )
 
-    # Optional dependencies (extras)
+    # Optional dependencies (extras) - group is "optional" for tracking
     optional_deps = project.get("optional-dependencies") if project else None
     if optional_deps and isinstance(optional_deps, dict):
-        for _extra_name, extra_deps in optional_deps.items():
+        for extra_name, extra_deps in optional_deps.items():
             for dep in extra_deps:
                 if isinstance(dep, str):
                     package_name, version_spec = extract_package_name(dep)
                     packages.append(
-                        (dep, package_name, version_spec if version_spec else None)
+                        (
+                            dep,
+                            package_name,
+                            version_spec if version_spec else None,
+                            f"optional:{extra_name}",
+                        )
                     )
 
     # Dependency groups (PEP 735 style, used by uv)
     dep_groups = doc.get("dependency-groups")
     if dep_groups and isinstance(dep_groups, dict):
-        for _group_name, group_deps in dep_groups.items():
+        for group_name, group_deps in dep_groups.items():
             for dep in group_deps:
                 if isinstance(dep, str):
                     package_name, version_spec = extract_package_name(dep)
                     packages.append(
-                        (dep, package_name, version_spec if version_spec else None)
+                        (
+                            dep,
+                            package_name,
+                            version_spec if version_spec else None,
+                            group_name,
+                        )
                     )
 
-    # Legacy tool.uv.dev-dependencies for backwards compatibility
+    # Legacy tool.uv.dev-dependencies for backwards compatibility - treated as "dev" group
     tool = doc.get("tool")
     if tool and isinstance(tool, dict):
         uv = tool.get("uv")
@@ -315,7 +303,12 @@ def collect_dependencies(doc: TOMLDocument) -> list[tuple[str, str, str | None]]
                     if isinstance(dep, str):
                         package_name, version_spec = extract_package_name(dep)
                         packages.append(
-                            (dep, package_name, version_spec if version_spec else None)
+                            (
+                                dep,
+                                package_name,
+                                version_spec if version_spec else None,
+                                "dev",
+                            )
                         )
 
     return packages
@@ -333,12 +326,6 @@ def update(
         bool,
         typer.Option(
             "--dry-run", "-n", help="Show what would be updated without making changes"
-        ),
-    ] = False,
-    no_lock: Annotated[
-        bool,
-        typer.Option(
-            "--no-lock", help="Don't run 'uv lock' after updating pyproject.toml"
         ),
     ] = False,
 ) -> None:
@@ -365,8 +352,8 @@ def update(
     if packages:
         target_packages = set(packages)
         filtered_packages = [
-            (dep, name, spec)
-            for dep, name, spec in all_packages
+            (dep, name, spec, group)
+            for dep, name, spec, group in all_packages
             if re.sub(r"\[.*\]", "", name) in target_packages
         ]
         if not filtered_packages:
@@ -382,11 +369,11 @@ def update(
 
     seen = set()
     unique_packages = []
-    for dep, name, spec in all_packages:
+    for dep, name, spec, group in all_packages:
         base_name = re.sub(r"\[.*\]", "", name)
         if base_name not in seen and base_name != project_name:
             seen.add(base_name)
-            unique_packages.append((dep, name, spec))
+            unique_packages.append((dep, name, spec, group))
 
     typer.echo(f"Found {len(unique_packages)} unique package(s) to check")
 
@@ -408,75 +395,113 @@ def update(
         typer.echo("\nDry run complete. No changes made.")
         raise typer.Exit(0)
 
-    # Apply updates to TOML
-    modified = False
+    # Group updates by their dependency group
+    # updates is dict[str, tuple[str, str, str | None]] -> base_name: (old_dep, new_dep, group)
+    from collections import defaultdict
 
-    # Update main dependencies
-    project = doc.get("project")
-    if project and isinstance(project, dict):
-        deps = project.get("dependencies")
-        if deps and isinstance(deps, list):
-            if update_dependency_in_toml(doc, deps, updates, "dependencies"):
-                modified = True
+    grouped_updates: dict[str | None, dict[str, tuple[str, str]]] = defaultdict(dict)
 
-        # Update optional dependencies
-        optional_deps = project.get("optional-dependencies")
-        if optional_deps and isinstance(optional_deps, dict):
-            for extra_name, extra_deps in optional_deps.items():
-                if isinstance(extra_deps, list):
-                    if update_dependency_in_toml(
-                        doc, extra_deps, updates, f"optional-dependencies.{extra_name}"
-                    ):
-                        modified = True
+    for base_name, (old_dep, new_dep, group) in updates.items():
+        # Skip optional dependencies (extras) - they can't be updated with uv remove/add
+        if group and group.startswith("optional:"):
+            typer.echo(
+                f"  Skipping {base_name} (optional dependency - manual update required)"
+            )
+            continue
+        grouped_updates[group][base_name] = (old_dep, new_dep)
 
-    # Update dependency groups
-    dep_groups = doc.get("dependency-groups")
-    if dep_groups and isinstance(dep_groups, dict):
-        for group_name, group_deps in dep_groups.items():
-            if isinstance(group_deps, list):
-                if update_dependency_in_toml(
-                    doc, group_deps, updates, f"dependency-groups.{group_name}"
-                ):
-                    modified = True
+    if not grouped_updates:
+        typer.echo("\nNo packages to update (all may be optional dependencies)")
+        raise typer.Exit(0)
 
-    # Update legacy tool.uv.dev-dependencies
-    tool = doc.get("tool")
-    if tool and isinstance(tool, dict):
-        uv = tool.get("uv")
-        if uv and isinstance(uv, dict):
-            dev_deps = uv.get("dev-dependencies")
-            if dev_deps and isinstance(dev_deps, list):
-                if update_dependency_in_toml(
-                    doc, dev_deps, updates, "tool.uv.dev-dependencies"
-                ):
-                    modified = True
+    cwd = path.parent
+    total_updated = sum(len(group) for group in grouped_updates.values())
 
-    if modified:
-        # Write updated TOML
-        path.write_text(tomlkit.dumps(doc))
-        typer.echo(f"\n✓ Updated {path}")
+    # Step 1: Remove ALL packages from ALL groups first
+    typer.echo(f"\nRemoving {total_updated} package(s) from all groups...")
 
-        # Run uv lock
-        if not no_lock:
-            typer.echo("\nRunning 'uv lock' to update uv.lock...")
-            try:
-                subprocess.run(
-                    ["uv", "lock"],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    cwd=path.parent,
-                )
-                typer.echo("✓ uv.lock updated successfully")
-            except subprocess.CalledProcessError as e:
-                typer.echo("✗ Failed to run 'uv lock':", err=True)
-                typer.echo(e.stderr, err=True)
-                raise typer.Exit(1) from e
-            except FileNotFoundError as e:
-                typer.echo("✗ 'uv' command not found. Please install uv.", err=True)
-                raise typer.Exit(1) from e
-    else:
-        typer.echo("\nNo changes were made")
+    for group, group_updates in sorted(
+        grouped_updates.items(), key=lambda x: (x[0] is None, x[0] or "")
+    ):
+        group_name = "main" if group is None else group
+        package_names = list(group_updates.keys())
+
+        remove_cmd = ["uv", "remove"]
+        if group is not None:
+            remove_cmd.extend(["--group", group])
+
+        try:
+            subprocess.run(
+                remove_cmd + package_names,
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=cwd,
+            )
+            typer.echo(f"  ✓ Removed from '{group_name}'")
+        except subprocess.CalledProcessError as e:
+            typer.echo(f"  ✗ Failed to remove from '{group_name}':", err=True)
+            typer.echo(e.stderr, err=True)
+            raise typer.Exit(1) from e
+        except FileNotFoundError as e:
+            typer.echo("✗ 'uv' command not found. Please install uv.", err=True)
+            raise typer.Exit(1) from e
+
+    # Step 2: Add all packages back using separate uv add commands per group
+    # This ensures packages are added to the correct groups
+    typer.echo(f"\nAdding {total_updated} package(s) back with 'uv add'...")
+
+    # Collect package names by group
+    main_packages = []
+    group_packages: dict[str, list[str]] = defaultdict(list)
+
+    for group, group_updates in grouped_updates.items():
+        for base_name, _ in group_updates.items():
+            if group is None:
+                main_packages.append(base_name)
+            else:
+                group_packages[group].append(base_name)
+
+    # Add main packages first (no --group flag)
+    if main_packages:
+        typer.echo("  Adding to main dependencies...")
+        add_cmd = ["uv", "add"] + main_packages
+        try:
+            subprocess.run(
+                add_cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=cwd,
+            )
+            typer.echo(f"    ✓ Added {len(main_packages)} package(s) to main")
+        except subprocess.CalledProcessError as e:
+            typer.echo("✗ Failed to add packages to main:", err=True)
+            typer.echo(e.stderr, err=True)
+            raise typer.Exit(1) from e
+
+    # Add packages for each group separately with --group flag
+    for group, packages in sorted(group_packages.items()):
+        if not packages:
+            continue
+        typer.echo(f"  Adding to '{group}' group...")
+        add_cmd = ["uv", "add", "--group", group] + packages
+        try:
+            subprocess.run(
+                add_cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=cwd,
+            )
+            typer.echo(f"    ✓ Added {len(packages)} package(s) to '{group}'")
+        except subprocess.CalledProcessError as e:
+            typer.echo(f"✗ Failed to add packages to '{group}':", err=True)
+            typer.echo(e.stderr, err=True)
+            raise typer.Exit(1) from e
+
+    typer.echo(f"\n✓ Updated {total_updated} package(s) successfully")
+    typer.echo("✓ pyproject.toml and uv.lock refreshed")
 
 
 def main() -> None:
