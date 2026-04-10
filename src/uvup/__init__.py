@@ -19,7 +19,10 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-app = typer.Typer(help="Update uv dependencies in pyproject.toml like pnpm")
+app = typer.Typer(
+    help="Update uv dependencies in pyproject.toml",
+    add_completion=False,
+)
 
 
 def extract_package_name(dep: str) -> tuple[str, str]:
