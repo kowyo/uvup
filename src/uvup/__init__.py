@@ -134,11 +134,49 @@ def update(
         typer.echo(f"Error: {path} not found", err=True)
         raise typer.Exit(1)
 
-    typer.echo(f"Reading dependencies from {path}...")
+    # Store original dependencies for comparison
+    def get_deps_dict(doc: TOMLDocument) -> dict[str, str]:
+        """Get dictionary of base package name -> full dependency string."""
+        deps = {}
+        project = doc.get("project")
+        if project and isinstance(project, dict):
+            for dep in project.get("dependencies", []):
+                if isinstance(dep, str):
+                    base_name = re.sub(r"\[.*\]", "", extract_package_name(dep)[0])
+                    deps[base_name] = dep
+            # Optional dependencies
+            optional = project.get("optional-dependencies")
+            if optional and isinstance(optional, dict):
+                for extra_deps in optional.values():
+                    for dep in extra_deps:
+                        if isinstance(dep, str):
+                            base_name = re.sub(
+                                r"\[.*\]", "", extract_package_name(dep)[0]
+                            )
+                            deps[base_name] = dep
+        # Dependency groups
+        dep_groups = doc.get("dependency-groups")
+        if dep_groups and isinstance(dep_groups, dict):
+            for group_deps in dep_groups.values():
+                for dep in group_deps:
+                    if isinstance(dep, str):
+                        base_name = re.sub(r"\[.*\]", "", extract_package_name(dep)[0])
+                        deps[base_name] = dep
+        # Legacy dev-dependencies
+        tool = doc.get("tool")
+        if tool and isinstance(tool, dict):
+            uv = tool.get("uv")
+            if uv and isinstance(uv, dict):
+                for dep in uv.get("dev-dependencies", []):
+                    if isinstance(dep, str):
+                        base_name = re.sub(r"\[.*\]", "", extract_package_name(dep)[0])
+                        deps[base_name] = dep
+        return deps
 
     # Parse TOML
     content = path.read_text()
     doc = tomlkit.parse(content)
+    original_deps = get_deps_dict(doc)
 
     # Collect all dependencies
     all_packages = collect_dependencies(doc)
@@ -174,15 +212,11 @@ def update(
             seen.add(base_name)
             unique_packages.append((dep, name, spec, group))
 
-    typer.echo(f"Found {len(unique_packages)} unique package(s) to update")
-
     if dry_run:
-        typer.echo("\nDry run mode - no changes will be made")
         for _dep, name, _spec, group in unique_packages:
             base_name = re.sub(r"\[.*\]", "", name)
             group_name = "main" if group is None else group
-            typer.echo(f"  Would update {base_name} ({group_name})")
-        typer.echo("\nDry run complete. No changes made.")
+            typer.echo(f"Would update {base_name} ({group_name})")
         raise typer.Exit(0)
 
     # Group packages by their dependency group
@@ -195,25 +229,18 @@ def update(
         base_name = re.sub(r"\[.*\]", "", name)
         # Skip optional dependencies (extras) - they can't be updated with uv remove/add
         if group and group.startswith("optional:"):
-            typer.echo(f"  Skipping {base_name} (optional dependency)")
             continue
         grouped_packages[group].append(base_name)
 
     if not grouped_packages:
-        typer.echo("\nNo packages to update (all may be optional dependencies)")
         raise typer.Exit(0)
 
     cwd = path.parent
-    total_updated = sum(len(group) for group in grouped_packages.values())
 
     # Step 1: Remove ALL packages from ALL groups first
-    typer.echo(f"\nRemoving {total_updated} package(s) from all groups...")
-
     for group, package_names in sorted(
         grouped_packages.items(), key=lambda x: (x[0] is None, x[0] or "")
     ):
-        group_name = "main" if group is None else group
-
         remove_cmd = ["uv", "remove"]
         if group is not None:
             remove_cmd.extend(["--group", group])
@@ -226,23 +253,18 @@ def update(
                 check=True,
                 cwd=cwd,
             )
-            typer.echo(f"  ✓ Removed from '{group_name}'")
         except subprocess.CalledProcessError as e:
-            typer.echo(f"  ✗ Failed to remove from '{group_name}':", err=True)
-            typer.echo(e.stderr, err=True)
+            typer.echo(f"Failed to remove packages: {e.stderr}", err=True)
             raise typer.Exit(1) from e
         except FileNotFoundError as e:
-            typer.echo("✗ 'uv' command not found. Please install uv.", err=True)
+            typer.echo("'uv' command not found. Please install uv.", err=True)
             raise typer.Exit(1) from e
 
     # Step 2: Add all packages back using separate uv add commands per group
     # This ensures packages are added to the correct groups
-    typer.echo(f"\nAdding {total_updated} package(s) back with 'uv add'...")
-
     # Add main packages first (no --group flag)
     main_packages = grouped_packages.get(None, [])
     if main_packages:
-        typer.echo("  Adding to main dependencies...")
         add_cmd = ["uv", "add"] + main_packages
         try:
             subprocess.run(
@@ -252,17 +274,16 @@ def update(
                 check=True,
                 cwd=cwd,
             )
-            typer.echo(f"    ✓ Added {len(main_packages)} package(s) to main")
         except subprocess.CalledProcessError as e:
-            typer.echo("✗ Failed to add packages to main:", err=True)
-            typer.echo(e.stderr, err=True)
+            typer.echo(f"Failed to add packages: {e.stderr}", err=True)
             raise typer.Exit(1) from e
 
     # Add packages for each group separately with --group flag
-    for group, packages in sorted(grouped_packages.items()):
+    for group, packages in sorted(
+        grouped_packages.items(), key=lambda x: (x[0] is None, x[0] or "")
+    ):
         if group is None or not packages:
             continue
-        typer.echo(f"  Adding to '{group}' group...")
         add_cmd = ["uv", "add", "--group", group] + packages
         try:
             subprocess.run(
@@ -272,14 +293,28 @@ def update(
                 check=True,
                 cwd=cwd,
             )
-            typer.echo(f"    ✓ Added {len(packages)} package(s) to '{group}'")
         except subprocess.CalledProcessError as e:
-            typer.echo(f"✗ Failed to add packages to '{group}':", err=True)
-            typer.echo(e.stderr, err=True)
+            typer.echo(f"Failed to add packages: {e.stderr}", err=True)
             raise typer.Exit(1) from e
 
-    typer.echo(f"\n✓ Updated {total_updated} package(s) successfully")
-    typer.echo("✓ pyproject.toml and uv.lock refreshed")
+    # Compare and report updates
+    new_content = path.read_text()
+    new_doc = tomlkit.parse(new_content)
+    new_deps = get_deps_dict(new_doc)
+
+    updates: list[tuple[str, str, str]] = []  # (package_name, old_dep, new_dep)
+    for base_name in sorted(set(original_deps.keys()) & set(new_deps.keys())):
+        old_dep = original_deps[base_name]
+        new_dep = new_deps[base_name]
+        if old_dep != new_dep:
+            updates.append((base_name, old_dep, new_dep))
+
+    if updates:
+        typer.echo(f"{len(updates)} package(s) updated:")
+        for name, old, new in updates:
+            typer.echo(f"  {name}: {old} -> {new}")
+    else:
+        typer.echo("No packages updated")
 
 
 def main() -> None:
