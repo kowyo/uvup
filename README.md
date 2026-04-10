@@ -16,7 +16,7 @@ A CLI tool to update uv dependencies in `pyproject.toml` like `pnpm update`.
 ## Installation
 
 ```bash
-uv tool install uvup
+uv tool install git+https://github.com/kowyo/uvup.git@main
 ```
 
 ## License
