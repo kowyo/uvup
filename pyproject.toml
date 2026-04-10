@@ -3,6 +3,7 @@ name = "uvup"
 version = "0.1.0"
 description = "A CLI tool to update uv dependencies like pnpm update"
 readme = "README.md"
+authors = [{ name = "Kowyo", email = "kowyo@outlook.com" }]
 requires-python = ">=3.14"
 dependencies = [
     "httpx>=0.28.1",
