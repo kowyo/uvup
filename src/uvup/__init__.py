@@ -8,6 +8,7 @@ from typing import Annotated
 
 import tomlkit
 import typer
+from packaging.requirements import Requirement
 from tomlkit import TOMLDocument
 
 
@@ -247,14 +248,25 @@ def update(
     # Skip optional dependencies (extras) - they can't be updated with uv remove/add
     from collections import defaultdict
 
-    grouped_packages: dict[str | None, list[str]] = defaultdict(list)
+    # Store (base_name, marker) per group to preserve platform markers through remove+add
+    grouped_packages: dict[str | None, list[tuple[str, str | None]]] = defaultdict(list)
 
-    for _dep, name, _spec, group in unique_packages:
+    for dep, name, _spec, group in unique_packages:
         base_name = re.sub(r"\[.*\]", "", name)
         # Skip optional dependencies (extras) - they can't be updated with uv remove/add
         if group and group.startswith("optional:"):
             continue
-        grouped_packages[group].append(base_name)
+
+        # Extract marker from the original dependency string (PEP 508)
+        marker: str | None = None
+        try:
+            req = Requirement(dep)
+            if req.marker:
+                marker = str(req.marker)
+        except Exception:
+            pass
+
+        grouped_packages[group].append((base_name, marker))
 
     if not grouped_packages:
         raise typer.Exit(0)
@@ -262,9 +274,10 @@ def update(
     cwd = path.parent
 
     # Step 1: Remove ALL packages from ALL groups first
-    for group, package_names in sorted(
+    for group, package_info_list in sorted(
         grouped_packages.items(), key=lambda x: (x[0] is None, x[0] or "")
     ):
+        package_names = [pkg_name for pkg_name, _marker in package_info_list]
         remove_cmd = ["uv", "remove"]
         if group is not None:
             remove_cmd.extend(["--group", group])
@@ -284,42 +297,56 @@ def update(
             typer.echo("'uv' command not found. Please install uv.", err=True)
             raise typer.Exit(1) from e
 
-    # Step 2: Add all packages back using separate uv add commands per group
-    # This ensures packages are added to the correct groups
+    # Step 2: Add all packages back, preserving markers
+    # Packages with the same marker can be batched together
+
+    def add_packages(
+        packages_info: list[tuple[str, str | None]],
+        group: str | None = None,
+    ) -> None:
+        """Add packages back, preserving markers by batching per-marker.
+        
+        Packages without markers are batched together.
+        Packages sharing the same marker string are batched together.
+        """
+        from collections import defaultdict
+
+        # Group by marker
+        by_marker: dict[str | None, list[str]] = defaultdict(list)
+        for pkg_name, marker in packages_info:
+            by_marker[marker].append(pkg_name)
+
+        for marker, pkgs in by_marker.items():
+            add_cmd = ["uv", "add"]
+            if group is not None:
+                add_cmd.extend(["--group", group])
+            if marker is not None:
+                add_cmd.extend(["--marker", marker])
+            add_cmd.extend(pkgs)
+            try:
+                subprocess.run(
+                    add_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    cwd=cwd,
+                )
+            except subprocess.CalledProcessError as e:
+                typer.echo(f"Failed to add packages: {e.stderr}", err=True)
+                raise typer.Exit(1) from e
+
     # Add main packages first (no --group flag)
     main_packages = grouped_packages.get(None, [])
     if main_packages:
-        add_cmd = ["uv", "add"] + main_packages
-        try:
-            subprocess.run(
-                add_cmd,
-                capture_output=True,
-                text=True,
-                check=True,
-                cwd=cwd,
-            )
-        except subprocess.CalledProcessError as e:
-            typer.echo(f"Failed to add packages: {e.stderr}", err=True)
-            raise typer.Exit(1) from e
+        add_packages(main_packages)
 
     # Add packages for each group separately with --group flag
-    for group, packages in sorted(
+    for group, packages_info in sorted(
         grouped_packages.items(), key=lambda x: (x[0] is None, x[0] or "")
     ):
-        if group is None or not packages:
+        if group is None or not packages_info:
             continue
-        add_cmd = ["uv", "add", "--group", group] + packages
-        try:
-            subprocess.run(
-                add_cmd,
-                capture_output=True,
-                text=True,
-                check=True,
-                cwd=cwd,
-            )
-        except subprocess.CalledProcessError as e:
-            typer.echo(f"Failed to add packages: {e.stderr}", err=True)
-            raise typer.Exit(1) from e
+        add_packages(packages_info, group=group)
 
     # Compare and report updates
     new_content = path.read_text()
